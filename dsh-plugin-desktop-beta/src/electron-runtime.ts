@@ -18,6 +18,9 @@ import { desktopTerminalStateDirectory, openDesktopTerminal } from './desktop-te
 import { showDesktopMessageBox } from './desktop-dialog-window.ts'
 import { packagedDependencyPath } from './packaged-runtime-path.ts'
 import { ElectronShellGeneration } from './electron-shell-generation.ts'
+import { isPlatformLoginDestination, type DesktopPlatformLoginRequest } from './platform-login.ts'
+import { PLATFORM_LOGIN_TITLE, platformLoginUrl } from './platform-login-window.ts'
+import type { DesktopOpenWorkspaceDelivery } from './launch-workspace-contract.ts'
 import { electronPlatformStrategy, type ElectronPlatformStrategy } from './electron-platform.ts'
 import type {
   DesktopNotification,
@@ -39,7 +42,7 @@ import {
   type RendererHealthFailureReason,
   type RendererHealthVerdict,
 } from './renderer-health.ts'
-import type { DesktopLogger } from './desktop-logger.ts'
+import { formatDesktopExitCode, type DesktopLogger } from './desktop-logger.ts'
 import { exportDesktopDiagnostics } from './diagnostic-export.ts'
 import {
   desktopDiagnosticsPrivacyCopy,
@@ -66,7 +69,6 @@ import {
 } from './windows-volume-diagnostics.ts'
 import { ElectronWorkspaceAdmission } from './workspace-admission.ts'
 import { ProfileCreateWindow, type ProfileCreateWindowOptions } from './profile-create-window.ts'
-import { windowsBuildNumber } from './window-material.ts'
 import { desktopNativeCopy } from './native-dialog-copy.ts'
 import {
   FileMainWindowStateStore,
@@ -101,9 +103,9 @@ const NULL_BODY_STATUSES = new Set([204, 205, 304])
 
 /**
  * Download-request adapter over Electron `net.request`. `net.fetch` cannot
- * back the download origin gate: its Response carries an empty `url` (a
+ * supply the HTTPS check: its Response carries an empty `url` (a
  * documented Electron limitation), so redirects are followed here and the
- * settled URL is reported alongside the response for the gate to validate.
+ * settled URL is reported alongside the response for validation.
  */
 export function requestDesktopArtifact(url: string, init: RequestInit): Promise<UpdateArtifactResponse> {
   return new Promise((resolve, reject) => {
@@ -177,8 +179,8 @@ export function requestDesktopArtifact(url: string, init: RequestInit): Promise<
 
 /** Native adapter used by the DSH Desktop launcher and owned by its Cordis shell plugin. */
 export class ElectronDesktopRuntime implements DesktopRuntime {
+  setupOnboarding?: import('./setup-onboarding-bridge.ts').DesktopOnboardingBridge
   readonly platform: DesktopPlatform
-  readonly windowsBuild: number | undefined
   private readonly platformStrategy: ElectronPlatformStrategy
   readonly updates: DesktopUpdateAdapter
 
@@ -196,6 +198,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   private rendererBootHealthy = false
   private profileCreateWindow: ProfileCreateWindow | undefined
   private restartRequest: Promise<void> | undefined
+  private hostStoppedRecovery: Promise<void> | undefined
 
   constructor(
     private readonly restart: (target?: 'recovery' | 'safe-mode') => Promise<void>,
@@ -207,7 +210,6 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   ) {
     this.platformStrategy = electronPlatformStrategy()
     this.platform = this.platformStrategy.platform
-    this.windowsBuild = this.platform === 'win32' ? windowsBuildNumber() : undefined
     const platformStrategy = this.platformStrategy
     this.workspaceAdmission = new ElectronWorkspaceAdmission({
       platform: this.platform,
@@ -324,6 +326,7 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
         platform: this.platformStrategy,
         spec,
         preloadPath: desktopPreloadPath(),
+        pickDirectory: () => this.pickDirectory(),
         buildApplicationMenuItems: () => this.buildApplicationMenuItems(),
         isQuitting: () => this.quitting,
         buildTrayTemplate: () => this.buildTrayTemplate(spec),
@@ -334,6 +337,8 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
         rendererRecoveryCopy: () => rendererRecoveryCopy[this.currentLocale],
         logError: message => { this.logError(message) },
         mainWindowState: this.mainWindowState,
+        platformLoginTitle: () => PLATFORM_LOGIN_TITLE[this.currentLocale],
+        setupOnboarding: this.setupOnboarding,
         chromeActions: {
           ...(remoteOffer ? { remoteControl: {
             read: () => remoteOffer.read(),
@@ -386,6 +391,30 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   }
 
   /** @inheritdoc */
+  platformLogin(request: DesktopPlatformLoginRequest): void {
+    if (this.quitting) return
+    if (request.action === 'close') {
+      this.generation?.closePlatformLogin()
+      if (request.focus) this.show()
+      return
+    }
+    if (!isPlatformLoginDestination(request.url)) {
+      this.logError('dsh-plugin-desktop: refused a platform sign-in page outside HTTPS or loopback HTTP')
+      return
+    }
+    const url = platformLoginUrl(request.url, nativeTheme.shouldUseDarkColors)
+    // A system browser reaches the Host's loopback callback only while browser access is on;
+    // otherwise the built-in window replays the callback with the renderer's credentials.
+    if (request.external) {
+      void shell.openExternal(url).catch((cause: unknown) => {
+        this.logError(`dsh-plugin-desktop: failed to open the platform sign-in page: ${cause instanceof Error ? cause.message : String(cause)}`)
+      })
+      return
+    }
+    this.generation?.openPlatformLogin(url)
+  }
+
+  /** @inheritdoc */
   async pickDirectory(): Promise<string | null> {
     return await this.workspaceAdmission.pickDirectory()
   }
@@ -393,6 +422,31 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   /** @inheritdoc */
   async validateDirectory(path: string): Promise<boolean> {
     return await this.workspaceAdmission.validateDirectory(path)
+  }
+
+  /**
+   * Apply native policy to a folder named by a launch.
+   *
+   * Launch hand-offs stay off the Host runtime contract: the path is native
+   * input that the main process already owns, and nothing in the Host needs to
+   * be able to ask for it.
+   * @param path - absolute folder the launch asked Desktop to open.
+   * @returns whether the folder may be registered as a workspace.
+   */
+  async admitWorkspacePath(path: string): Promise<boolean> {
+    return await this.workspaceAdmission.admitWorkspacePath(path)
+  }
+
+  /**
+   * Hand one admitted launch folder to the mounted Host page.
+   * @param path - absolute folder already admitted by native policy.
+   * @returns how the page took the folder, or `'unavailable'` before a shell
+   *   generation is mounted.
+   */
+  async openWorkspacePath(path: string): Promise<DesktopOpenWorkspaceDelivery | 'unavailable'> {
+    const generation = this.generation
+    if (generation === undefined) return 'unavailable'
+    return await generation.openWorkspacePath(path)
   }
 
   /** @inheritdoc */
@@ -559,10 +613,6 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   setThemeSource(source: DesktopThemeSource): void {
     if (this.platform !== 'linux' && this.generation !== undefined) {
       nativeTheme.themeSource = source
-      // Windows can retain the preceding DWM Mica palette until the window is
-      // recomposed (for example after minimize/restore). Reapplying the active
-      // material invalidates the backdrop immediately after a live theme change.
-      this.generation.refreshThemeMaterial()
     }
   }
 
@@ -618,11 +668,46 @@ export class ElectronDesktopRuntime implements DesktopRuntime {
   prepareToQuit(): void {
     this.quitting = true
     this.generation?.stopRendererRecovery()
+    this.generation?.closePlatformLogin()
     this.stopRendererBootMonitoring()
   }
 
   private failRendererBoot(reason: RendererHealthFailureReason, error: string): void {
     this.rendererHealthGate?.fail(reason, error)
+  }
+
+  /**
+   * Offer an in-app way out after the supervised Host exits on its own. Kept off
+   * the shared `DesktopRuntime` contract on purpose: only the Electron main
+   * process supervises the Host, and the Host must never be able to ask for this.
+   * @param exit - the reported exit code, shown so a report can name it.
+   */
+  async showHostStoppedRecovery(exit: { readonly exitCode: number }): Promise<void> {
+    if (this.quitting) return
+    // A Host death arrives once, but the renderer keeps failing against the
+    // gone endpoint afterwards. One dialog per death, never a stack of them.
+    if (this.hostStoppedRecovery !== undefined) return await this.hostStoppedRecovery
+    const request = this.confirmHostStopped(exit).finally(() => {
+      if (this.hostStoppedRecovery === request) this.hostStoppedRecovery = undefined
+    })
+    this.hostStoppedRecovery = request
+    await request
+  }
+
+  private async confirmHostStopped(exit: { readonly exitCode: number }): Promise<void> {
+    const copy = desktopNativeCopy(this.currentLocale)
+    const result = await this.showDesktopMessageBox({
+      type: 'error',
+      title: copy.hostStoppedTitle,
+      message: copy.hostStoppedMessage,
+      detail: `${copy.hostStoppedDetail(formatDesktopExitCode(exit.exitCode))}\n\n${copy.hostStoppedInstructions}`,
+      buttons: [copy.restart, copy.openTerminal, copy.dismiss],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+    })
+    if (result.response === 0) await this.requestRestart()
+    else if (result.response === 1) this.openTerminal()
   }
 
   private async showRendererBootRecovery(report: Extract<RendererBootReport, { status: 'failed' }>): Promise<void> {

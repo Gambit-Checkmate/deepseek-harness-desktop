@@ -54,12 +54,37 @@ it('forwards upload bytes and cancellation with Host credentials while keeping t
   const [target, init] = fetch.mock.calls[0] as unknown as [URL, RequestInit]
   expect(target.href).toBe('http://127.0.0.1:1234/api/upload?name=file')
   expect(new Headers(init.headers).get('cookie')).toBe('session=owned')
-  expect(new Headers(init.headers).get('origin')).toBeNull()
+  expect(new Headers(init.headers).get('origin')).toBe('http://127.0.0.1:1234')
   expect(init.signal).toBe(request.signal)
   expect(init.body).toBe(request.body)
   expect(response.headers.get('set-cookie')).toBeNull()
   expect(response.headers.get('content-encoding')).toBeNull()
   expect(await response.text()).toBe('stream')
+})
+
+it('drops connection-level headers the Host wrote for its own transport', async () => {
+  const fetch = vi.fn().mockResolvedValue(new Response('body', { headers: {
+    'transfer-encoding': 'chunked', connection: 'keep-alive', 'keep-alive': 'timeout=5', trailer: 'x', te: 'trailers',
+    'content-type': 'text/plain', 'cache-control': 'no-cache', etag: '"1"',
+  } }))
+  vi.stubGlobal('fetch', fetch)
+  const response = await forwardWebRequest(ownedRequest('dsh-app://app/api/read'), 'http://127.0.0.1:1234/', 'session=owned', NATIVE_TOKEN)
+  for (const name of ['transfer-encoding', 'connection', 'keep-alive', 'trailer', 'te']) expect(response.headers.get(name)).toBeNull()
+  expect(response.headers.get('content-type')).toBe('text/plain')
+  expect(response.headers.get('cache-control')).toBe('no-cache')
+  expect(response.headers.get('etag')).toBe('"1"')
+})
+
+it('replaces the immutable cache header of plugin bundles with no-store and leaves other routes alone', async () => {
+  const immutable = 'public, max-age=31536000, immutable'
+  const fetch = vi.fn().mockImplementation(async () => new Response('js', { headers: { 'cache-control': immutable } }))
+  vi.stubGlobal('fetch', fetch)
+  const bundle = await forwardWebRequest(ownedRequest('dsh-app://app/plugins/??a/client.js&rev=1'), 'http://127.0.0.1:1234/', 'c', NATIVE_TOKEN)
+  expect(bundle.headers.get('cache-control')).toBe('no-store')
+  const chunk = await forwardWebRequest(ownedRequest('dsh-app://app/plugins/a/client.x.js?rev=1'), 'http://127.0.0.1:1234/', 'c', NATIVE_TOKEN)
+  expect(chunk.headers.get('cache-control')).toBe('no-store')
+  const asset = await forwardWebRequest(ownedRequest('dsh-app://app/api/plugins/list'), 'http://127.0.0.1:1234/', 'c', NATIVE_TOKEN)
+  expect(asset.headers.get('cache-control')).toBe(immutable)
 })
 
 it('refuses another page origin without forwarding its request', async () => {
@@ -71,11 +96,11 @@ it('refuses another page origin without forwarding its request', async () => {
   expect(fetch).not.toHaveBeenCalled()
 })
 
-it.each(['sources', 'operations/preview', 'operations/execute'])('forwards native Market %s without an Origin header', async path => {
+it.each(['/api/community-market/sources', '/api/community-market/operations/preview', '/api/community-market/operations/execute', '/dsh-market/update', '/other-plugin/mutation'])('forwards native plugin route %s without an Origin header', async path => {
   const fetch = vi.fn().mockResolvedValue(new Response('{}'))
   vi.stubGlobal('fetch', fetch)
   // The main-process network hook supplies the marker even when Origin is absent.
-  const request = ownedRequest(`dsh-app://app/api/community-market/${path}`, {
+  const request = ownedRequest(`dsh-app://app${path}`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
   })
   const response = await forwardWebRequest(request, 'http://127.0.0.1:1234/', 'session=owned', NATIVE_TOKEN)

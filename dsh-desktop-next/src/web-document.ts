@@ -68,11 +68,29 @@ export async function authenticateWebHost(url: string, nativeToken?: string): Pr
 }
 
 /**
+ * Response headers not relayed to the renderer. `set-cookie` would hand the
+ * Host's authentication cookie to the page's cookie jar, which the shell owns
+ * instead; the rest describe the Node `fetch` connection (its encoding, length,
+ * and hop-by-hop transport), which Chromium never sees.
+ */
+const WITHHELD_RESPONSE_HEADERS = [
+  'set-cookie',
+  'content-encoding', 'content-length',
+  'transfer-encoding', 'connection', 'keep-alive', 'te', 'trailer', 'upgrade', 'proxy-authenticate', 'proxy-authorization',
+]
+
+/** Host routes whose responses carry immutable cache headers keyed by a per-process revision. */
+const PLUGIN_BUNDLE_PATH = /^\/plugins\//u
+
+/**
  * Forward local application requests to its authenticated Host, preserving streaming and cancellation.
+ * Plugin bundle responses lose their `cache-control` for `no-store`: the Host marks them immutable
+ * under a revision that changes every launch, so Chromium's disk cache would only accumulate bundles
+ * no later launch can reuse.
  * @param request - Request from the application origin.
  * @param host - Owned Host URL.
  * @param cookie - Host-issued authentication cookie.
- * @returns Host response without network-only encoding headers.
+ * @returns Host response without connection-level headers.
  */
 export async function forwardWebRequest(request: Request, host: string, cookie: string, nativeToken: string): Promise<Response> {
   const source = new URL(request.url)
@@ -83,7 +101,6 @@ export async function forwardWebRequest(request: Request, host: string, cookie: 
   if (source.protocol !== 'dsh-app:' || source.host !== 'app' || source.username || source.password
     || !nativeToken || request.headers.get(NATIVE_ACCESS_HEADER) !== nativeToken) return new Response(null, { status: 403 })
   if (origin !== null && origin !== 'dsh-app://app') return new Response(null, { status: 403 })
-  const market = source.pathname.startsWith('/api/community-market/')
   const target = new URL(host)
   target.pathname = source.pathname
   target.search = source.search
@@ -91,15 +108,15 @@ export async function forwardWebRequest(request: Request, host: string, cookie: 
   for (const name of ['host', 'origin', 'cookie', 'sec-fetch-site', NATIVE_ACCESS_HEADER]) headers.delete(name)
   headers.set('cookie', cookie)
   headers.set(NATIVE_ACCESS_HEADER, nativeToken)
-  // Market retains its own same-origin mutation gate. Only translate after
-  // validating the application origin; never trust a caller-supplied Host.
-  if (market) {
-    headers.set('origin', target.origin)
-    headers.set('sec-fetch-site', 'same-origin')
-  }
+  // Preserve same-origin semantics for every owned plugin route, including
+  // /dsh-market/*. Translate only after validating the native frame marker and
+  // source origin; the HTTP client supplies Host from this owned target URL.
+  headers.set('origin', target.origin)
+  headers.set('sec-fetch-site', 'same-origin')
   const init = { method: request.method, headers, body: request.body, signal: request.signal, duplex: 'half', redirect: 'manual' as const }
   const response = await fetch(target, init)
   const outgoing = new Headers(response.headers)
-  for (const name of ['content-encoding', 'content-length', 'set-cookie']) outgoing.delete(name)
+  for (const name of WITHHELD_RESPONSE_HEADERS) outgoing.delete(name)
+  if (PLUGIN_BUNDLE_PATH.test(source.pathname)) outgoing.set('cache-control', 'no-store')
   return new Response(response.body, { status: response.status, headers: outgoing })
 }

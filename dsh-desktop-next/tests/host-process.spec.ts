@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { DesktopHostProcess, DesktopHostUncleanExitError } from '../src/host-process.ts'
+import { DesktopHostFatalError, DesktopHostProcess, DesktopHostUncleanExitError } from '../src/host-process.ts'
 
 const roots: string[] = []
 const hosts: DesktopHostProcess[] = []
@@ -71,6 +71,47 @@ afterEach(async () => {
 })
 
 describe('desktop host process', () => {
+  it('returns Desktop permission snapshots over private child IPC', async () => {
+    const snapshot = { permission: 'screen' as const, status: 'denied' as const, canRequest: false, canOpenSettings: true }
+    const source = HTTP_HOST.replace('const server = createServer', 'let permissionResponse;\nconst server = createServer')
+      .replace("  if (request.url === '/fatal') {", `
+        if (request.url === '/permission') {
+          permissionResponse = response;
+          process.send({ type: 'permission', requestId: 7, action: 'query', permission: 'screen' }); return;
+        }
+        if (request.url === '/fatal') {`)
+      .replace("  if (message.type === 'browser-access') {", `
+        if (message.type === 'permission-result') { permissionResponse.end(JSON.stringify(message)); return; }
+        if (message.type === 'browser-access') {`)
+    const runtime = projectWithHost(source)
+    const permission = vi.fn(async () => snapshot)
+    const host = new DesktopHostProcess(process.execPath, runtime, runtime, undefined, process.env, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, permission)
+    hosts.push(host)
+    const { url } = await host.start()
+    expect(await (await fetch(new URL('/permission', url))).json()).toEqual({ type: 'permission-result', requestId: 7, snapshot })
+    expect(permission).toHaveBeenCalledExactlyOnceWith('query', 'screen')
+  })
+
+  it('delivers bounded user-turn previews over child IPC', async () => {
+    const notification = { outcome: 'turn-completed', userMessage: 'Check my code', assistantMessage: 'Fixed the issue.' }
+    const runtime = projectWithHost(HTTP_HOST.replace("  if (request.url === '/fatal') {", `
+      if (request.url === '/notify') {
+        process.send({ type: 'notification', notification: ${JSON.stringify(notification)} })
+        response.end('sent'); return
+      }
+      if (request.url === '/fatal') {`))
+    const notify = vi.fn()
+    const failure = vi.fn()
+    const host = new DesktopHostProcess(process.execPath, runtime, runtime, undefined, process.env, failure,
+      undefined, undefined, undefined, undefined, notify)
+    hosts.push(host)
+    const { url } = await host.start()
+    await fetch(new URL('/notify', url))
+    await expect.poll(() => notify.mock.calls).toEqual([[notification]])
+    expect(failure).not.toHaveBeenCalled()
+  })
+
   it('correlates browser-policy acknowledgements and refuses stale or failed changes', async () => {
     const host = hostProcess(projectWithHost())
     await expect(host.setBrowserAccess(true)).rejects.toThrow('unavailable')
@@ -124,15 +165,15 @@ describe('desktop host process', () => {
     expect(failure).not.toHaveBeenCalled()
   })
 
-  it('passes external dependencies and runtime profile resolution to the Host', async () => {
+  it('passes external dependencies and package-manager paths to the Host', async () => {
     const runtime = projectWithHost(HTTP_HOST.replace('runtime: process.argv[2]',
-      'pnpm: process.argv[6], nodeBin: process.argv[7], primaryRuntime: process.argv[4], profileResolution: process.argv[5], runtime: process.argv[2]'))
+      'pnpm: process.argv[5], nodeBin: process.argv[6], primaryRuntime: process.argv[4], runtime: process.argv[2]'))
     const primaryRuntime = join(runtime, 'external-primary-runtime')
     const host = new DesktopHostProcess(process.execPath, runtime, runtime, undefined, process.env,
-      undefined, primaryRuntime, 'runtime', { pnpm: join(runtime, 'pnpm.mjs'), nodeBin: join(runtime, 'bin') })
+      undefined, primaryRuntime, { pnpm: join(runtime, 'pnpm.mjs'), nodeBin: join(runtime, 'bin') })
     hosts.push(host)
     const { url } = await host.start()
-    expect(await (await fetch(url)).json()).toMatchObject({ primaryRuntime, profileResolution: 'runtime', pnpm: join(runtime, 'pnpm.mjs'), nodeBin: join(runtime, 'bin') })
+    expect(await (await fetch(url)).json()).toMatchObject({ primaryRuntime, pnpm: join(runtime, 'pnpm.mjs'), nodeBin: join(runtime, 'bin') })
   })
 
   it('reports a fatal event after readiness once', async () => {
@@ -190,9 +231,72 @@ describe('desktop host process', () => {
   it.each([
     ["process.send({ type: 'fatal', message: 'startup failed' }); process.disconnect()", 'startup failed'],
     ["process.send({ type: 'ready', url: 4 })", 'invalid IPC event'],
+    ["process.send({ type: 'fatal', message: 'startup failed', diagnostic: 42 })", 'invalid IPC event'],
     ['process.exit(0)', 'host stopped'],
   ])('rejects startup when the child fails before readiness: %s', async (source, message) => {
     const host = hostProcess(projectWithHost(source))
     await expect(host.start()).rejects.toThrow(message)
+  })
+
+  it('keeps the Host\'s inspected error separate from the message it reports', async () => {
+    const diagnostic = "Error: startup failed\\n    at boot (lib/index.js:3:9) {\\n  code: 'ENOENT',\\n  path: '/profile/cordis.yml'\\n}"
+    const failures: Error[] = []
+    const host = hostProcess(projectWithHost(
+      `process.send({ type: 'fatal', message: 'startup failed', diagnostic: ${JSON.stringify(diagnostic)} }); process.disconnect()`,
+    ), undefined, (error) => { failures.push(error) })
+    await expect(host.start()).rejects.toThrow('startup failed')
+    const [failure] = failures
+    expect(failure).toBeInstanceOf(DesktopHostFatalError)
+    expect((failure as DesktopHostFatalError).diagnostic).toBe(diagnostic)
+    expect(Object.keys(failure!)).not.toContain('diagnostic')
+  })
+
+  it('carries Platform credentials over private IPC and clears them on shutdown', async () => {
+    const runtime = projectWithHost(HTTP_HOST.replace("process.send({ type: 'ready'", "process.send({ type: 'platform-session', session: { origin: 'https://platform.deepseek.com', token: 'fixture-secret', embeddedPageDist: 'feat/test' } }); process.send({ type: 'ready'"))
+    const changed = vi.fn()
+    const host = new DesktopHostProcess(process.execPath, runtime, runtime, undefined, process.env, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, changed)
+    hosts.push(host)
+    await host.start()
+    expect(changed).toHaveBeenCalledWith({ origin: 'https://platform.deepseek.com', token: 'fixture-secret', embeddedPageDist: 'feat/test' })
+    await host.stop()
+    expect(changed).toHaveBeenLastCalledWith(null)
+  })
+
+  it.each([
+    ["{ origin: 'https://platform.deepseek.com', token: '' }", 'an empty credential'],
+    ["{ origin: 'http://platform.deepseek.com', token: 'secret' }", 'a plaintext non-loopback origin'],
+    ["{ origin: 'https://user:pass@platform.deepseek.com', token: 'secret' }", 'embedded userinfo'],
+    ["{ origin: 'https://platform.deepseek.com/app', token: 'secret' }", 'a path beyond the origin'],
+    ["{ origin: 'https://platform.deepseek.com', token: 'secret', requestHeaders: { 'X-Deploy': 'a' } }", 'an upper-case header name'],
+    ["{ origin: 'https://platform.deepseek.com', token: 'secret', requestHeaders: { authorization: 'a' } }", 'a forbidden header'],
+    ["{ origin: 'https://platform.deepseek.com', token: 'secret', requestHeaders: { 'x-deploy': 'a\\r\\nx: b' } }", 'a header value carrying CRLF'],
+  ])('refuses a Platform session with %s (%s)', async (session) => {
+    const host = hostProcess(projectWithHost(`process.send({ type: 'platform-session', session: ${session} })`))
+    await expect(host.start()).rejects.toThrow('invalid IPC event')
+  })
+
+  it('hands Platform sign-in pages and ended attempts to the shell', async () => {
+    const url = 'https://platform.deepseek.com/dsh/authorize?state=fixture'
+    const runtime = projectWithHost(HTTP_HOST.replace("process.send({ type: 'ready'",
+      `process.send({ type: 'platform-login', action: 'open', url: '${url}' }); process.send({ type: 'platform-login', action: 'close', focus: true }); process.send({ type: 'ready'`))
+    const login = vi.fn()
+    const host = new DesktopHostProcess(process.execPath, runtime, runtime, undefined, process.env, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, login)
+    hosts.push(host)
+    await host.start()
+    expect(login.mock.calls).toEqual([[{ action: 'open', url }], [{ action: 'close', focus: true }]])
+  })
+
+  it.each([
+    ["{ type: 'platform-login', action: 'open', url: 'http://platform.deepseek.com/dsh/authorize' }", 'a plaintext non-loopback page'],
+    ["{ type: 'platform-login', action: 'open', url: 'https://user:pass@platform.deepseek.com/' }", 'embedded userinfo'],
+    ["{ type: 'platform-login', action: 'open', url: 'file:///C:/Windows/System32/calc.exe' }", 'a local file'],
+    ["{ type: 'platform-login', action: 'open' }", 'a missing page'],
+    ["{ type: 'platform-login', action: 'run', url: 'https://platform.deepseek.com/' }", 'an unknown action'],
+    ["{ type: 'platform-login', action: 'close' }", 'a close without a focus decision'],
+  ])('refuses a Platform sign-in request %s (%s)', async (event) => {
+    const host = hostProcess(projectWithHost(`process.send(${event})`))
+    await expect(host.start()).rejects.toThrow('invalid IPC event')
   })
 })

@@ -3,7 +3,16 @@
 import { desktopErrorState } from './startup-error.ts'
 
 /** Backend availability presented by the desktop window. */
-export type DesktopBackendState = { readonly phase: 'starting' } | { readonly phase: 'ready' } | { readonly phase: 'error'; readonly message: string }
+export type DesktopBackendState =
+  | { readonly phase: 'starting' }
+  | { readonly phase: 'ready' }
+  /** `message` is the rendered text; `failure` is the original error so a crash report keeps its stack, properties, and cause. */
+  | { readonly phase: 'error'; readonly message: string; readonly failure: unknown }
+
+/** The error state for one failure: rendered message plus the failure itself. */
+function errorState(failure: unknown): DesktopBackendState {
+  return { ...desktopErrorState(failure), failure }
+}
 
 /** Child lifecycle owned by the desktop backend controller. */
 export interface DesktopBackendHost {
@@ -54,13 +63,18 @@ export class DesktopBackendController<Host extends DesktopBackendHost> {
     if (this.pending !== undefined) return this.pending
     if (this.current.phase === 'ready') return Promise.resolve()
     const previous = this.attempt
-    const attempt: Attempt<Host> = { cancelled: false, ...(previous?.cleanup === undefined ? {} : { cleanup: previous.cleanup }) }
+    const attempt: Attempt<Host> = { cancelled: false,
+      ...(previous?.host === undefined ? {} : { host: previous.host }),
+      ...(previous?.cleanup === undefined ? {} : { cleanup: previous.cleanup }) }
     this.attempt = attempt
     this.update({ phase: 'starting' })
     const pending = Promise.resolve().then(async () => {
+      let replacing = previous !== undefined
       try {
-        await previous?.cleanup
+        if (replacing) await this.cleanup(attempt)
         delete attempt.cleanup
+        delete attempt.host
+        replacing = false
         if (attempt.cancelled) return
         await prepare()
         // stop() can cancel this attempt while preparation is pending.
@@ -74,13 +88,16 @@ export class DesktopBackendController<Host extends DesktopBackendHost> {
         // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
         if (!attempt.cancelled) this.update({ phase: 'ready' })
       } catch (error) {
+        // Inherited cleanup belongs to the previous attempt; its rejection
+        // must also release this attempt's cache while retaining the same Host.
+        if (replacing) delete attempt.cleanup
         const cancelled = attempt.cancelled
         attempt.cancelled = true
         let failure = error
-        try { await this.cleanup(attempt) } catch (cleanupError) {
+        try { if (!replacing) await this.cleanup(attempt) } catch (cleanupError) {
           if (cleanupError !== error) failure = new AggregateError([error, cleanupError], 'desktop backend startup and cleanup failed')
         }
-        if (!cancelled) this.update(desktopErrorState(failure))
+        if (!cancelled) this.update(errorState(failure))
         throw failure
       }
     }).finally(() => { if (this.pending === pending) this.pending = undefined })
@@ -121,7 +138,13 @@ export class DesktopBackendController<Host extends DesktopBackendHost> {
 
   private cleanup(attempt: Attempt<Host>): Promise<void> {
     if (attempt.cleanup === undefined) {
-      attempt.cleanup = Promise.resolve().then(async () => { await attempt.host?.stop() })
+      const cleanup = Promise.resolve().then(async () => { await attempt.host?.stop() }).catch((error: unknown) => {
+        // A failed termination retains Host ownership but permits another stop
+        // attempt. Never start a replacement until that stop actually succeeds.
+        if (attempt.cleanup === cleanup) delete attempt.cleanup
+        throw error
+      })
+      attempt.cleanup = cleanup
     }
     return attempt.cleanup
   }
@@ -132,9 +155,9 @@ export class DesktopBackendController<Host extends DesktopBackendHost> {
     if (this.current.phase !== 'ready') return
     attempt.cancelled = true
     const cleanup = this.cleanup(attempt)
-    this.update(desktopErrorState(error))
+    this.update(errorState(error))
     void cleanup.catch((cleanupError: unknown) => {
-      if (this.attempt === attempt) this.update(desktopErrorState(new AggregateError([error, cleanupError], 'Desktop backend failed and could not stop')))
+      if (this.attempt === attempt) this.update(errorState(new AggregateError([error, cleanupError], 'Desktop backend failed and could not stop')))
     })
   }
 

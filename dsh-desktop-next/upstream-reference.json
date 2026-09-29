@@ -1,12 +1,22 @@
 {
   "repository": "https://github.com/deepseek-ai/deepseek-harness",
-  "commit": "ddefc45fbc7f8e46dd73185e68295696d1297887",
-  "version": "0.1.6-alpha.2",
+  "commit": "639ed015397290b3745d163aafe02ffee4aa3f84",
+  "version": "0.2.0-rc.2",
   "files": [
     {
       "upstream": "apps/desktop/src/host-process.ts",
       "local": "src/host-process.ts",
-      "upstreamSha256": "f46169be5638b815929fd267cf985af5da3d284dfc8874a797cdcd396d22389f"
+      "upstreamSha256": "6b9d3e558f526b7832020fb43d6682a07a68bf2d5657f26951f50a4f3eabfa28"
+    },
+    {
+      "upstream": "apps/desktop/src/browser-guests.ts",
+      "local": "src/browser-guests.ts",
+      "upstreamSha256": "5911d6bcbce79b68bd951d27da40bf8b8c9ab57b7d715dd0586d5e74e8e515f4"
+    },
+    {
+      "upstream": "apps/desktop/src/preload-browser.ts",
+      "local": "src/preload-browser.ts",
+      "upstreamSha256": "17c386171796e77f6a2bfa3c86382a20cce36013275beca978f31b424ef25e9e"
     },
     {
       "upstream": "apps/desktop/src/node-environment.ts",
@@ -16,12 +26,12 @@
     {
       "upstream": "apps/desktop/src/web-document.ts",
       "local": "src/web-document.ts",
-      "upstreamSha256": "550c91ba601f245ce4220a6f6c1abe16ce7a23005431368eaef3e3c6f9e56a24"
+      "upstreamSha256": "05ab6fd59199f1b7a7dd558e60f50e38f4df1085a70af671014c085d270e91cc"
     },
     {
       "upstream": "apps/desktop/src/backend-controller.ts",
       "local": "src/backend-controller.ts",
-      "upstreamSha256": "3475cb9ca34a92318affa9553f91d11b55d78fe7b7781dc70e6855f28d65c456"
+      "upstreamSha256": "eec9641e9abf40586464d7b3d4ffa8d968e040696f3fc7923507faae3d82ed27"
     },
     {
       "upstream": "apps/desktop/src/startup-error.ts",
@@ -36,7 +46,7 @@
     {
       "upstream": "apps/desktop/tests/host-process.spec.ts",
       "local": "tests/host-process.spec.ts",
-      "upstreamSha256": "86ca6881707d8943c175ec95635003bcf6641e6fef17f8afb594b5765112a16a"
+      "upstreamSha256": "b539b90d064ba2b52f2a5a2faf3a83d08911cc69f8644bc4783f17dbc98fcb86"
     },
     {
       "upstream": "apps/desktop/tests/node-environment.spec.ts",
@@ -46,12 +56,12 @@
     {
       "upstream": "apps/desktop/tests/web-document.spec.ts",
       "local": "tests/web-document.spec.ts",
-      "upstreamSha256": "63efaa30d991a4c95373a5d0b8c957afcf118d41a456387a14c7c32826050a79"
+      "upstreamSha256": "7b8dcccededac3bb9f978e4446a00a1cf97fb7573f73fdd47e0de842bf92539b"
     },
     {
       "upstream": "apps/desktop/tests/backend-controller.spec.ts",
       "local": "tests/backend-controller.spec.ts",
-      "upstreamSha256": "9ac4e18bc93977741cbbc4760af71de9dfe60d68d39ed57d29c2fad61c96a0fa"
+      "upstreamSha256": "924fbe2145d44c9cec10f024e78a98f37f49c62a6287e85fc98ff3c6b8d96028"
     },
     {
       "upstream": "apps/desktop/tests/single-instance.spec.ts",
@@ -61,12 +71,12 @@
     {
       "upstream": "apps/desktop/src/preload-platform.ts",
       "local": "src/preload-platform.ts",
-      "upstreamSha256": "4d97d27ee98d472c27be0efd5b90b52eebd61930e05d31d9f81634a36539204c"
+      "upstreamSha256": "ab7e89b0a65c650a264a611f2abf3cc43346be796e2dbc9d24b0d04f7b96212f"
     },
     {
       "upstream": "apps/desktop/src/preload-theme.ts",
       "local": "src/preload-theme.ts",
-      "upstreamSha256": "41ab2e0293265e08a06761fe28ce271577ca818148f9ec55e6113a66ef6b41b8"
+      "upstreamSha256": "5e9dc7e9d4014a2532141b3e2bfe763444badc27f63b07c589892723a49c7299"
     },
     {
       "upstream": "apps/desktop/src/preload-windows.ts",
@@ -76,12 +86,27 @@
     {
       "upstream": "apps/desktop/src/preload-menu.ts",
       "local": "src/preload-menu.ts",
-      "upstreamSha256": "e9a7383739abbfa6446a6415af9e00c7aabc927a9f479264c98319b7671ea162"
+      "upstreamSha256": "456b5004c2c0c7f511e7b2d732ad1bfc394712cb26c9f38d8852aba75c0d1c60"
     },
     {
       "upstream": "apps/desktop/src/windows-layout.ts",
       "local": "src/windows-layout.ts",
       "upstreamSha256": "c032247c34d9794171aa3bd67534d511aca9f8963058d9976fb57f8c06a24628"
+    },
+    {
+      "upstream": "apps/desktop/src/keyboard.ts",
+      "local": "src/keyboard.ts",
+      "upstreamSha256": "7cf07391d8998813ea894d0e5d2f47053f5cc13dc9f48f257856cd19143b6728"
+    },
+    {
+      "upstream": "apps/desktop/src/keybindings.ts",
+      "local": "src/keybindings.ts",
+      "upstreamSha256": "44b1d0c19a430acaf5b6d19b10d6e4db0eda450ecc333731d82cebb87a6e403f"
+    },
+    {
+      "upstream": "apps/desktop/tests/keybindings.spec.ts",
+      "local": "tests/keybindings.spec.ts",
+      "upstreamSha256": "3d90e7dfde4733a9fec33b44a3347805404d4ba0a1a68ca4648ec5e94002a3ad"
     }
   ]
 }

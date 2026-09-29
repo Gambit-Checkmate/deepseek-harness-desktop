@@ -8,9 +8,11 @@ import {
   HardDrive,
   History,
   LifeBuoy,
+  MessageCircle,
   PackageX,
   Plug,
   Power,
+  PowerOff,
   RefreshCw,
   RotateCcw,
   ShieldCheck,
@@ -54,12 +56,15 @@ import type { DesktopLocale } from '../../runtime.ts'
 
 const SCHEME = 'dsh-recovery:'
 
+interface RecoverySupport { readonly href: string; readonly label: string; readonly hint: string }
+
 interface RecoveryBundle {
   readonly bundleId: string
   readonly packageName: string
   readonly status: 'active' | 'disabled'
   readonly owner: 'core' | 'profile' | 'external'
   readonly action: 'uninstall' | null
+  readonly toggle: 'disable' | 'enable' | null
 }
 interface RecoveryCheckpoint {
   readonly slotId: 'slot-1' | 'slot-2' | 'slot-3'
@@ -188,7 +193,7 @@ function SafeModePanel({ copy, state }: { readonly copy: DesktopRecoveryCopy; re
 
 function PluginsPanel({ copy, state }: { readonly copy: DesktopRecoveryCopy; readonly state: RecoveryState }): JSX.Element {
   if (state.snapshot === undefined) return <PanelScroll><Alert variant="destructive"><AlertTriangle /><AlertTitle>{copy.plugins}</AlertTitle><AlertDescription>{copy.pluginsUnavailable}</AlertDescription></Alert></PanelScroll>
-  return <PanelScroll><Card><CardHeader><CardTitle>{copy.plugins}</CardTitle><CardDescription>{copy.pluginsBody}</CardDescription></CardHeader><CardContent className="divide-y p-0">{state.snapshot.bundles.length === 0 ? <p className="px-6 py-5 text-sm text-muted-foreground">{copy.pluginsEmpty}</p> : state.snapshot.bundles.map(bundle => <div className="flex items-center justify-between gap-4 px-6 py-3" key={bundle.bundleId}><div className="min-w-0"><p className="truncate text-sm font-medium">{bundle.packageName}</p><p className="text-xs text-muted-foreground">{bundle.owner === 'core' ? copy.core : bundle.owner === 'profile' ? copy.profileDependency : copy.external}</p></div><div className="flex shrink-0 items-center gap-2">{bundle.status === 'disabled' ? <span className="rounded-full bg-muted px-2 py-1 text-xs">{copy.disabled}</span> : null}{bundle.action === 'uninstall' ? <Action action="preview-uninstall" icon={<PackageX />} id={bundle.bundleId} variant="destructive">{copy.uninstall}</Action> : null}</div></div>)}</CardContent></Card></PanelScroll>
+  return <PanelScroll><Card><CardHeader><CardTitle>{copy.plugins}</CardTitle><CardDescription>{copy.pluginsBody}</CardDescription></CardHeader><CardContent className="divide-y p-0">{state.snapshot.bundles.length === 0 ? <p className="px-6 py-5 text-sm text-muted-foreground">{copy.pluginsEmpty}</p> : state.snapshot.bundles.map(bundle => <div className="flex items-center justify-between gap-4 px-6 py-3" key={bundle.bundleId}><div className="min-w-0"><p className="truncate text-sm font-medium">{bundle.packageName}</p><p className="text-xs text-muted-foreground">{bundle.status === 'disabled' ? copy.disabledHint : bundle.owner === 'core' ? copy.core : bundle.owner === 'profile' ? copy.profileDependency : copy.external}</p></div><div className="flex shrink-0 items-center gap-2">{bundle.status === 'disabled' ? <span className="rounded-full bg-muted px-2 py-1 text-xs">{copy.disabled}</span> : null}{bundle.toggle === 'disable' ? <Action action="preview-disable" icon={<PowerOff />} id={bundle.bundleId} variant="secondary">{copy.disable}</Action> : null}{bundle.toggle === 'enable' ? <Action action="preview-enable" icon={<Power />} id={bundle.bundleId} variant="default">{copy.enable}</Action> : null}{bundle.action === 'uninstall' ? <Action action="preview-uninstall" icon={<PackageX />} id={bundle.bundleId} variant="destructive">{copy.uninstall}</Action> : null}</div></div>)}</CardContent></Card></PanelScroll>
 }
 
 function ProfilesPanel({ copy, state }: { readonly copy: DesktopRecoveryCopy; readonly state: RecoveryState }): JSX.Element {
@@ -253,14 +258,14 @@ function Reason({ copy, state }: { readonly copy: DesktopRecoveryCopy; readonly 
 }
 
 /** Keep the recovery terminal pill opposite the platform's native controls. */
-export function RecoveryTerminalAction({ busy = false, copy, search }: { readonly busy?: boolean; readonly copy: DesktopRecoveryCopy; readonly search: string }): JSX.Element | null {
+export function RecoveryTerminalAction({ busy = false, copy, search, support, terminalAvailable = true }: { readonly busy?: boolean; readonly copy: DesktopRecoveryCopy; readonly search: string; readonly support?: RecoverySupport | undefined; readonly terminalAvailable?: boolean }): JSX.Element | null {
   if (!desktopFrameIsVisible(search)) return null
   const platform = new URLSearchParams(search).get('platform')
   if (platform !== 'darwin' && platform !== 'win32') return null
-  return <div className={cn('fixed top-1 z-[1001] flex h-7 items-center', platform === 'win32' ? 'left-3' : 'right-3', busy && 'pointer-events-none opacity-60')}><Action action="open-terminal" className="h-7 rounded-full bg-background/80 px-3 shadow-sm backdrop-blur" icon={<Terminal />}>{copy.openTerminal}</Action></div>
+  return <div className={cn('fixed top-1 z-[1001] flex h-7 items-center gap-2', platform === 'win32' ? 'left-3' : 'right-3', busy && 'pointer-events-none opacity-60')}>{support && <RecoveryActionLink href={support.href} className="h-7 rounded-full bg-background/80 px-3 shadow-sm backdrop-blur" icon={<MessageCircle />}>{support.label}</RecoveryActionLink>}{terminalAvailable && <Action action="open-terminal" className="h-7 rounded-full bg-background/80 px-3 shadow-sm backdrop-blur" icon={<Terminal />}>{copy.openTerminal}</Action>}</div>
 }
 
-export function RecoveryApp({ state: providedState, copy: providedCopy }: { readonly state?: RecoveryState; readonly copy?: DesktopRecoveryCopy } = {}): JSX.Element {
+export function RecoveryApp({ state: providedState, copy: providedCopy, support }: { readonly state?: RecoveryState; readonly copy?: DesktopRecoveryCopy; readonly support?: RecoverySupport } = {}): JSX.Element {
   const state = providedState ?? decodeState()
   const [activeTab, setActiveTab] = useState<DesktopRecoveryTab>(state?.activeTab ?? 'quick')
   const focusDestination = useRef(false)
@@ -278,5 +283,5 @@ export function RecoveryApp({ state: providedState, copy: providedCopy }: { read
     return <><DesktopFrame /><main className="dshNativeContent flex h-screen items-center justify-center p-6"><Alert variant="destructive"><AlertTriangle /><AlertTitle>{copy.title}</AlertTitle><AlertDescription>{copy.fallbackBody}</AlertDescription></Alert></main></>
   }
   const copy = providedCopy ?? desktopRecoveryCopy(state.locale)
-  return <><DesktopFrame />{state.terminalAvailable ? <RecoveryTerminalAction busy={state.busy} copy={copy} search={window.location.search} /> : null}<main className={cn('dshNativeContent h-screen overflow-hidden p-5 sm:p-6', state.busy && 'pointer-events-none opacity-70')}><div className="mx-auto flex h-full w-full max-w-5xl flex-col gap-4"><Reason copy={copy} state={state} /><Tabs value={activeTab} onValueChange={value => setActiveTab(value as DesktopRecoveryTab)}><TabsList className="w-full justify-start overflow-x-auto">{(!state.availableTabs || state.availableTabs.includes('quick')) && <TabsTrigger value="quick"><LifeBuoy />{copy.tabs.quick}</TabsTrigger>}{(!state.availableTabs || state.availableTabs.includes('plugins')) && <TabsTrigger value="plugins"><Plug />{copy.tabs.plugins}</TabsTrigger>}{(!state.availableTabs || state.availableTabs.includes('rollback')) && <TabsTrigger value="rollback"><History />{copy.tabs.rollback}</TabsTrigger>}{(!state.availableTabs || state.availableTabs.includes('profiles')) && <TabsTrigger value="profiles"><Users />{copy.tabs.profiles}</TabsTrigger>}{(!state.availableTabs || state.availableTabs.includes('data')) && <TabsTrigger value="data"><HardDrive />{copy.tabs.data}</TabsTrigger>}{(!state.availableTabs || state.availableTabs.includes('diagnostics')) && <TabsTrigger value="diagnostics"><Stethoscope />{copy.tabs.diagnostics}</TabsTrigger>}</TabsList><TabsContent value="quick"><QuickRecoveryPanel copy={copy} state={state} onNavigate={navigate} /></TabsContent><TabsContent value="plugins"><PluginsPanel copy={copy} state={state} /></TabsContent><TabsContent value="rollback"><RollbackPanel copy={copy} state={state} /></TabsContent><TabsContent value="profiles"><ProfilesPanel copy={copy} state={state} /></TabsContent><TabsContent value="data"><DataManagementPanel copy={copy} state={state} /></TabsContent><TabsContent value="diagnostics"><DiagnosticsPanel copy={copy} state={state} /></TabsContent></Tabs><RecoveryActionFooter leading={state.busy ? <span className="inline-flex items-center gap-2 text-sm text-muted-foreground"><RefreshCw className="size-4 animate-spin" />{copy.working}</span> : undefined}><Action action="restart" icon={<RotateCcw />} variant={state.restartReady ? 'default' : 'outline'}>{copy.restart}</Action><Action action="quit" icon={<Power />}>{copy.quit}</Action></RecoveryActionFooter></div></main><RecoveryNoticeSurface notice={state.notice} /></>
+  return <><DesktopFrame />{state.terminalAvailable || support ? <RecoveryTerminalAction busy={state.busy} copy={copy} search={window.location.search} support={support} terminalAvailable={state.terminalAvailable === true} /> : null}<main className={cn('dshNativeContent h-screen overflow-hidden p-5 sm:p-6', state.busy && 'pointer-events-none opacity-70')}><div className="mx-auto flex h-full w-full max-w-5xl flex-col gap-4">{support && <p className="shrink-0 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs leading-relaxed text-amber-800 dark:text-amber-200" data-recovery-support>{support.hint}{(!desktopFrameIsVisible(window.location.search) || new URLSearchParams(window.location.search).get('platform') === 'linux') && <> <a className="underline" href={support.href}>{support.label}</a></>}</p>}<Reason copy={copy} state={state} /><Tabs value={activeTab} onValueChange={value => setActiveTab(value as DesktopRecoveryTab)}><TabsList className="w-full justify-start overflow-x-auto">{(!state.availableTabs || state.availableTabs.includes('quick')) && <TabsTrigger value="quick"><LifeBuoy />{copy.tabs.quick}</TabsTrigger>}{(!state.availableTabs || state.availableTabs.includes('plugins')) && <TabsTrigger value="plugins"><Plug />{copy.tabs.plugins}</TabsTrigger>}{(!state.availableTabs || state.availableTabs.includes('rollback')) && <TabsTrigger value="rollback"><History />{copy.tabs.rollback}</TabsTrigger>}{(!state.availableTabs || state.availableTabs.includes('profiles')) && <TabsTrigger value="profiles"><Users />{copy.tabs.profiles}</TabsTrigger>}{(!state.availableTabs || state.availableTabs.includes('data')) && <TabsTrigger value="data"><HardDrive />{copy.tabs.data}</TabsTrigger>}{(!state.availableTabs || state.availableTabs.includes('diagnostics')) && <TabsTrigger value="diagnostics"><Stethoscope />{copy.tabs.diagnostics}</TabsTrigger>}</TabsList><TabsContent value="quick"><QuickRecoveryPanel copy={copy} state={state} onNavigate={navigate} /></TabsContent><TabsContent value="plugins"><PluginsPanel copy={copy} state={state} /></TabsContent><TabsContent value="rollback"><RollbackPanel copy={copy} state={state} /></TabsContent><TabsContent value="profiles"><ProfilesPanel copy={copy} state={state} /></TabsContent><TabsContent value="data"><DataManagementPanel copy={copy} state={state} /></TabsContent><TabsContent value="diagnostics"><DiagnosticsPanel copy={copy} state={state} /></TabsContent></Tabs><RecoveryActionFooter leading={state.busy ? <span className="inline-flex items-center gap-2 text-sm text-muted-foreground"><RefreshCw className="size-4 animate-spin" />{copy.working}</span> : undefined}><Action action="restart" icon={<RotateCcw />} variant={state.restartReady ? 'default' : 'outline'}>{copy.restart}</Action><Action action="quit" icon={<Power />}>{copy.quit}</Action></RecoveryActionFooter></div></main><RecoveryNoticeSurface notice={state.notice} /></>
 }
